@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>EchoMon ICMP TOOL</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+    body { font-family: 'JetBrains Mono', monospace; }
+    .log-line { font-size: 13.5px; line-height: 1.5; white-space: pre; }
+    #logContainer::-webkit-scrollbar { width: 7px; }
+    #logContainer::-webkit-scrollbar-track { background: #111827; }
+    #logContainer::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
+
+    /* Modal styles */
+    .modal { display: none; position: fixed; z-index: 50; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.8); backdrop-filter: blur(4px); }
+    .modal-content { background-color: #111827; margin: 5% auto; padding: 20px; border: 1px solid #374151; width: 90%; max-width: 1200px; border-radius: 1rem; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5); }
+</style>
+<script type="module" src="/src/main.ts" defer></script>
+</head>
+<body class="bg-gray-950 text-gray-100 flex flex-col h-screen overflow-hidden">
+
+<header class="border-b border-gray-800 bg-gray-900/90 backdrop-blur py-4 shrink-0">
+    <div class="max-w-7xl mx-auto px-6 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+            <div class="w-9 h-9 bg-emerald-600 rounded-lg flex items-center justify-center text-black font-bold text-2xl">E</div>
+            <span class="text-2xl font-bold tracking-tight">EchoMon <span class="text-emerald-400">ICMP TOOL</span></span>
+        </div>
+        <div class="flex items-center gap-4">
+            <button onclick="showHistory()" class="text-sm bg-gray-800 hover:bg-gray-700 px-4 py-2 rounded-lg transition-colors flex items-center gap-2">
+                <span>📜 History</span>
+            </button>
+            <div class="text-sm text-gray-500">Real-time ICMP echo monitoring tool.</div>
+        </div>
+    </div>
+</header>
+
+<main class="flex-1 flex gap-8 overflow-hidden px-6 py-6 max-w-7xl mx-auto w-full">
+    <!-- Left panel -->
+    <div class="w-96 flex flex-col gap-6 overflow-y-auto">
+        <div class="bg-gray-900 border border-gray-800 rounded-2xl p-6 shadow-lg">
+            <h2 class="text-emerald-400 text-xs font-semibold mb-5 uppercase tracking-wider">Control Panel</h2>
+            <div class="space-y-5">
+                <div>
+                    <label class="block text-xs text-gray-400 mb-1.5">TARGET IP</label>
+                    <input id="targetIP" type="text" value="8.8.8.8" class="w-full bg-gray-950 border border-gray-700 rounded-xl px-4 py-3 text-lg font-mono focus:border-emerald-500 outline-none">
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-xs text-gray-400 mb-1.5">INTERVAL (ms)</label>
+                        <input id="interval" type="number" value="1000" min="200" step="100" class="w-full bg-gray-950 border border-gray-700 rounded-xl px-4 py-3 text-lg font-mono focus:border-emerald-500 outline-none">
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-400 mb-1.5">DURATION (s) • 0 = ∞</label>
+                        <input id="duration" type="number" value="0" min="0" class="w-full bg-gray-950 border border-gray-700 rounded-xl px-4 py-3 text-lg font-mono focus:border-emerald-500 outline-none">
+                    </div>
+                </div>
+                <div class="flex gap-3">
+                    <button id="startBtn" onclick="startPing()" class="flex-1 bg-emerald-600 hover:bg-emerald-500 text-black font-bold py-3.5 rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed">START</button>
+                    <button id="stopBtn" onclick="stopPing()" disabled class="flex-1 bg-red-700 hover:bg-red-600 text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed">STOP</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="bg-gray-900 border border-gray-800 rounded-2xl p-6 shadow-lg flex-1">
+            <h2 class="text-emerald-400 text-xs font-semibold mb-5 uppercase tracking-wider">Live Statistics</h2>
+            <div class="grid grid-cols-2 gap-4 mb-6">
+                <div class="bg-gray-950 border border-gray-800 rounded-xl p-4 text-center"><div class="text-xs text-gray-400">Sent</div><div id="sent" class="text-4xl font-bold text-white">0</div></div>
+                <div class="bg-gray-950 border border-gray-800 rounded-xl p-4 text-center"><div class="text-xs text-gray-400">Received</div><div id="received" class="text-4xl font-bold text-emerald-400">0</div></div>
+                <div class="bg-gray-950 border border-gray-800 rounded-xl p-4 text-center"><div class="text-xs text-gray-400">Lost</div><div id="lost" class="text-4xl font-bold text-red-400">0</div></div>
+                <div class="bg-gray-950 border border-gray-800 rounded-xl p-4 text-center"><div class="text-xs text-gray-400">Loss %</div><div id="lossPct" class="text-4xl font-bold text-amber-400">0.0</div></div>
+            </div>
+            <div class="grid grid-cols-3 gap-4 text-center pt-4 border-t border-gray-800">
+                <div><div class="text-xs text-gray-400">MIN</div><div id="minRTT" class="text-2xl font-bold text-sky-400">—</div><div class="text-xs text-gray-500">ms</div></div>
+                <div><div class="text-xs text-gray-400">AVG</div><div id="avgRTT" class="text-2xl font-bold">—</div><div class="text-xs text-gray-500">ms</div></div>
+                <div><div class="text-xs text-gray-400">MAX</div><div id="maxRTT" class="text-2xl font-bold text-orange-400">—</div><div class="text-xs text-gray-500">ms</div></div>
+            </div>
+            <div class="mt-6 text-xs text-gray-500 flex justify-between">
+                <span>Uptime</span>
+                <span id="uptime" class="text-emerald-400 font-medium">00:00</span>
+            </div>
+        </div>
+
+        <div class="flex gap-3">
+            <button onclick="downloadLogs()" class="flex-1 bg-gray-800 hover:bg-gray-700 py-3 rounded-xl text-sm">📋 TXT Logs</button>
+            <button onclick="generatePDF()" class="flex-1 bg-gray-800 hover:bg-gray-700 py-3 rounded-xl text-sm">📈 PDF Report</button>
+        </div>
+    </div>
+
+    <!-- Terminal -->
+    <div class="flex-1 flex flex-col h-full">
+        <div class="border border-gray-800 rounded-2xl overflow-hidden flex flex-col h-full bg-gray-950 shadow-2xl">
+            <div class="bg-gray-950 px-6 py-3 border-b border-gray-800 flex items-center justify-between text-xs text-gray-500 shrink-0">
+                <div class="flex items-center gap-3">
+                    <div class="flex gap-2"><div class="w-3 h-3 bg-red-500 rounded-full"></div><div class="w-3 h-3 bg-yellow-400 rounded-full"></div><div class="w-3 h-3 bg-emerald-500 rounded-full"></div></div>
+                    <span>EchoMon ICMP TOOL • <span id="liveIP" class="text-emerald-400">—</span></span>
+                </div>
+                <div id="packetCounter" class="font-mono">S:0 R:0 L:0</div>
+            </div>
+            <div id="logContainer" class="flex-1 overflow-y-auto p-5 text-emerald-300/95 bg-black/30"></div>
+        </div>
+    </div>
+</main>
+
+<!-- History Modal -->
+<div id="historyModal" class="modal">
+    <div class="modal-content flex flex-col h-[80vh]">
+        <div class="flex justify-between items-center mb-6 shrink-0">
+            <h2 class="text-2xl font-bold text-emerald-400">Session History</h2>
+            <button onclick="closeHistory()" class="text-gray-400 hover:text-white text-2xl">&times;</button>
+        </div>
+        <div class="flex-1 overflow-y-auto">
+            <table class="w-full text-left text-sm text-gray-400">
+                <thead class="text-xs text-gray-500 uppercase bg-gray-800 sticky top-0 z-10">
+                    <tr>
+                        <th class="px-4 py-3 rounded-tl-lg">ID</th>
+                        <th class="px-4 py-3">Target</th>
+                        <th class="px-4 py-3">Start Time</th>
+                        <th class="px-4 py-3">Duration</th>
+                        <th class="px-4 py-3 text-center">Sent</th>
+                        <th class="px-4 py-3 text-center">Loss %</th>
+                        <th class="px-4 py-3 text-center">Avg RTT</th>
+                        <th class="px-4 py-3">Status</th>
+                        <th class="px-4 py-3 text-right rounded-tr-lg">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="historyTableBody" class="divide-y divide-gray-800">
+                    <!-- Rows will be populated here -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- Hidden canvas for PDF generation -->
+<div style="position: absolute; left: -9999px;">
+    <canvas id="rttChart" width="1000" height="400"></canvas>
+</div>
+
+</body>
+</html>
