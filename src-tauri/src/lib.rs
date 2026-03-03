@@ -11,6 +11,8 @@ use std::str::FromStr;
 use std::time::Duration;
 use surge_ping::{Client, Config, PingIdentifier, PingSequence, IcmpPacket};
 use rand::random;
+use tauri_plugin_dialog::MessageDialogBuilder;
+use tauri_plugin_dialog::DialogExt;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct PingResult {
@@ -268,11 +270,20 @@ pub fn run() {
             {
                 if !is_admin() {
                     let handle = app.handle().clone();
-                    tauri::api::dialog::message(
-                        Some(&handle.get_window("main").unwrap()),
-                        "Administrator Privileges Required",
-                        "EchoMon needs to be run as an administrator to send ICMP packets. Please restart the application with administrator rights.",
-                    );
+                    // Use the dialog plugin to show the message
+                    // Note: This might be blocking or async depending on implementation
+                    // Ideally we want to block startup until user acknowledges
+
+                    if let Some(window) = handle.get_webview_window("main") {
+                         MessageDialogBuilder::new()
+                            .set_parent(&window)
+                            .set_title("Administrator Privileges Required")
+                            .set_text("EchoMon needs to be run as an administrator to send ICMP packets. Please restart the application with administrator rights.")
+                            .show(|_| {});
+                    } else {
+                        // Fallback if window isn't ready (though setup usually runs before window is fully visible, the object exists)
+                        eprintln!("Administrator Privileges Required: EchoMon needs to be run as an administrator.");
+                    }
                 }
             }
             Ok(())
@@ -288,7 +299,6 @@ pub fn run() {
 
 #[cfg(windows)]
 fn is_admin() -> bool {
-    use std::ptr;
     use windows::Win32::System::Threading::{OpenProcessToken, GetCurrentProcess};
     use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_QUERY, TOKEN_ELEVATION};
     use std::mem;
