@@ -34,7 +34,7 @@ A modern, high-performance network ping tool built with **Tauri (Rust)** and **T
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/yourusername/echomon.git
+git clone https://github.com/var2611/EchoMon.git
 cd echomon
 ```
 

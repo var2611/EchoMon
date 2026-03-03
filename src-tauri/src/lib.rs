@@ -45,7 +45,14 @@ struct AppState {
 fn get_db_path() -> PathBuf {
     #[cfg(debug_assertions)]
     {
+        // In development, store DB in the project root (one level up from src-tauri)
+        // to avoid triggering the cargo watcher which watches src-tauri.
         if let Ok(cwd) = env::current_dir() {
+            // If we are running from src-tauri (cargo run), go up one level
+            if cwd.ends_with("src-tauri") {
+                return cwd.parent().unwrap().join("ping_history.db");
+            }
+            // If we are running from project root (npm run tauri dev), use current dir
             return cwd.join("ping_history.db");
         }
         return PathBuf::from("ping_history.db");
