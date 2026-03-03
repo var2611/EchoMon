@@ -11,7 +11,6 @@ use std::str::FromStr;
 use std::time::Duration;
 use surge_ping::{Client, Config, PingIdentifier, PingSequence, IcmpPacket};
 use rand::random;
-use tauri_plugin_dialog::MessageDialogBuilder;
 use tauri_plugin_dialog::DialogExt;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -264,30 +263,6 @@ pub fn run() {
     );
 
     tauri::Builder::default()
-        .setup(|app| {
-            // On Windows, check for admin rights.
-            #[cfg(windows)]
-            {
-                if !is_admin() {
-                    let handle = app.handle().clone();
-                    // Use the dialog plugin to show the message
-                    // Note: This might be blocking or async depending on implementation
-                    // Ideally we want to block startup until user acknowledges
-
-                    if let Some(window) = handle.get_webview_window("main") {
-                         MessageDialogBuilder::new()
-                            .set_parent(&window)
-                            .set_title("Administrator Privileges Required")
-                            .set_text("EchoMon needs to be run as an administrator to send ICMP packets. Please restart the application with administrator rights.")
-                            .show(|_| {});
-                    } else {
-                        // Fallback if window isn't ready (though setup usually runs before window is fully visible, the object exists)
-                        eprintln!("Administrator Privileges Required: EchoMon needs to be run as an administrator.");
-                    }
-                }
-            }
-            Ok(())
-        })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -295,34 +270,4 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![ping_host, get_stats, start_session, stop_session, get_sessions, delete_session, get_session_pings, export_logs_to_path, save_binary_file])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-#[cfg(windows)]
-fn is_admin() -> bool {
-    use windows::Win32::System::Threading::{OpenProcessToken, GetCurrentProcess};
-    use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_QUERY, TOKEN_ELEVATION};
-    use std::mem;
-
-    let mut token = Default::default();
-    unsafe {
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
-            return false;
-        }
-    }
-
-    let mut elevation: TOKEN_ELEVATION = unsafe { mem::zeroed() };
-    let mut size = mem::size_of::<TOKEN_ELEVATION>() as u32;
-    unsafe {
-        if GetTokenInformation(
-            token,
-            TokenElevation,
-            Some(&mut elevation as *mut _ as *mut _),
-            size,
-            &mut size,
-        ).is_err() {
-            return false;
-        }
-    }
-
-    elevation.TokenIsElevated != 0
 }
