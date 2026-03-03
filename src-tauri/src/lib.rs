@@ -1,15 +1,18 @@
-use std::process::Command;
 use std::sync::Mutex;
-use tauri::State;
+use tauri::{State, Manager};
 use rusqlite::{params, Connection};
 use serde::{Serialize, Deserialize};
 use chrono::Local;
-use regex::Regex;
 use std::env;
 use std::path::PathBuf;
 use std::fs;
+use std::net::{IpAddr, Ipv4Addr};
+use std::str::FromStr;
+use std::time::Duration;
+use surge_ping::{Client, Config, PingIdentifier, PingSequence, IcmpPacket};
+use rand::random;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct PingResult {
     success: bool,
     rtt: Option<f64>,
@@ -45,14 +48,10 @@ struct AppState {
 fn get_db_path() -> PathBuf {
     #[cfg(debug_assertions)]
     {
-        // In development, store DB in the project root (one level up from src-tauri)
-        // to avoid triggering the cargo watcher which watches src-tauri.
         if let Ok(cwd) = env::current_dir() {
-            // If we are running from src-tauri (cargo run), go up one level
             if cwd.ends_with("src-tauri") {
                 return cwd.parent().unwrap().join("ping_history.db");
             }
-            // If we are running from project root (npm run tauri dev), use current dir
             return cwd.join("ping_history.db");
         }
         return PathBuf::from("ping_history.db");
@@ -128,10 +127,7 @@ fn get_sessions(state: State<AppState>) -> Result<Vec<Session>, String> {
 fn delete_session(id: i64, state: State<AppState>) -> Result<(), String> {
     let conn = state.db.lock().map_err(|_| "Database lock failed".to_string())?;
 
-    // Delete the session
     conn.execute("DELETE FROM sessions WHERE id = ?1", params![id]).map_err(|e| e.to_string())?;
-
-    // Delete associated pings
     conn.execute("DELETE FROM pings WHERE session_id = ?1", params![id]).map_err(|e| e.to_string())?;
 
     Ok(())
@@ -170,45 +166,22 @@ fn save_binary_file(path: String, data: Vec<u8>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn ping_host(ip: String, session_id: Option<i64>, state: State<AppState>) -> PingResult {
-    let cmd_name;
-    let args: Vec<String>;
-
-    #[cfg(target_os = "windows")]
-    {
-        cmd_name = "ping";
-        args = vec!["-n".to_string(), "1".to_string(), "-w".to_string(), "1000".to_string(), ip.clone()];
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        cmd_name = "/sbin/ping";
-        args = vec!["-c".to_string(), "1".to_string(), "-W".to_string(), "1000".to_string(), ip.clone()];
-    }
-
-    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-    {
-        cmd_name = "ping";
-        args = vec!["-c".to_string(), "1".to_string(), "-W".to_string(), "1".to_string(), ip.clone()];
-    }
-
-    let mut cmd = Command::new(cmd_name);
-    cmd.args(&args);
-
-    let output = match cmd.output() {
-        Ok(o) => o,
-        Err(e) => return PingResult { success: false, rtt: None, error: Some(format!("Failed to execute ping: {}", e)) },
+async fn ping_host(ip: String, session_id: Option<i64>, state: State<'_, AppState>) -> Result<PingResult, String> {
+    let addr = match Ipv4Addr::from_str(&ip) {
+        Ok(addr) => addr,
+        Err(_) => return Ok(PingResult { success: false, rtt: None, error: Some("Invalid IP address".to_string()) }),
     };
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let client = Client::new(&Config::default()).map_err(|e| e.to_string())?;
+    let mut pinger = client.pinger(IpAddr::V4(addr), PingIdentifier(random())).await;
+    pinger.timeout(Duration::from_secs(1));
 
-    let rtt = if output.status.success() {
-        parse_ping_output(&stdout)
-    } else {
-        None
+    let result: Result<(IcmpPacket, Duration), surge_ping::SurgeError> = pinger.ping(PingSequence(0), &[]).await;
+
+    let (success, rtt, error) = match result {
+        Ok((_packet, rtt)) => (true, Some(rtt.as_micros() as f64 / 1000.0), None),
+        Err(e) => (false, None, Some(e.to_string())),
     };
-
-    let success = rtt.is_some();
 
     if let Ok(conn) = state.db.lock() {
         let timestamp = Local::now().to_rfc3339();
@@ -218,21 +191,7 @@ fn ping_host(ip: String, session_id: Option<i64>, state: State<AppState>) -> Pin
         );
     }
 
-    PingResult {
-        success,
-        rtt,
-        error: if success { None } else { Some("Request timed out".to_string()) },
-    }
-}
-
-fn parse_ping_output(output: &str) -> Option<f64> {
-    let re = Regex::new(r"time[=<]([\d\.]+)").ok()?;
-    if let Some(caps) = re.captures(output) {
-        if let Some(m) = caps.get(1) {
-            return m.as_str().parse::<f64>().ok();
-        }
-    }
-    None
+    Ok(PingResult { success, rtt, error })
 }
 
 #[tauri::command]
@@ -272,9 +231,6 @@ pub fn run() {
         Connection::open_in_memory().expect("Failed to create in-memory database")
     });
 
-    // Update pings table to include session_id
-    // We use CREATE TABLE IF NOT EXISTS, but if the table already exists without session_id, we need to handle migration.
-    // For simplicity in this dev phase, we'll just try to add the column and ignore error if it exists.
     let _ = conn.execute("ALTER TABLE pings ADD COLUMN session_id INTEGER", []);
 
     let _ = conn.execute(
@@ -306,6 +262,21 @@ pub fn run() {
     );
 
     tauri::Builder::default()
+        .setup(|app| {
+            // On Windows, check for admin rights.
+            #[cfg(windows)]
+            {
+                if !is_admin() {
+                    let handle = app.handle().clone();
+                    tauri::api::dialog::message(
+                        Some(&handle.get_window("main").unwrap()),
+                        "Administrator Privileges Required",
+                        "EchoMon needs to be run as an administrator to send ICMP packets. Please restart the application with administrator rights.",
+                    );
+                }
+            }
+            Ok(())
+        })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -313,4 +284,35 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![ping_host, get_stats, start_session, stop_session, get_sessions, delete_session, get_session_pings, export_logs_to_path, save_binary_file])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(windows)]
+fn is_admin() -> bool {
+    use std::ptr;
+    use windows::Win32::System::Threading::{OpenProcessToken, GetCurrentProcess};
+    use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_QUERY, TOKEN_ELEVATION};
+    use std::mem;
+
+    let mut token = Default::default();
+    unsafe {
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+            return false;
+        }
+    }
+
+    let mut elevation: TOKEN_ELEVATION = unsafe { mem::zeroed() };
+    let mut size = mem::size_of::<TOKEN_ELEVATION>() as u32;
+    unsafe {
+        if GetTokenInformation(
+            token,
+            TokenElevation,
+            Some(&mut elevation as *mut _ as *mut _),
+            size,
+            &mut size,
+        ).is_err() {
+            return false;
+        }
+    }
+
+    elevation.TokenIsElevated != 0
 }
