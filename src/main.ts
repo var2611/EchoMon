@@ -519,8 +519,25 @@ async function generatePDF() {
     doc.setFontSize(12); 
     doc.setTextColor(100);
     doc.text(`Target Host: ${target}`, 20, y); y += 7;
-    doc.text(`Date: ${new Date().toLocaleString()}`, 20, y); y += 7;
-    doc.text(`Duration: ${els.uptime.textContent}`, 20, y); y += 15;
+    
+    // Test Start Time
+    const startTimeStr = sessionStart ? new Date(sessionStart).toLocaleString() : "Unknown";
+    doc.text(`Test Start Time: ${startTimeStr}`, 20, y); y += 7;
+    
+    // Test Stop Time / Report Generated
+    const stopTimeStr = new Date().toLocaleString();
+    doc.text(`Test Stop Time: ${stopTimeStr}`, 20, y); y += 7;
+    
+    // Session Uptime/Duration
+    doc.text(`Session Duration: ${els.uptime.textContent} (Continuous monitoring)`, 20, y); y += 7;
+    
+    // Target Device IP (if resolved differently, maybe show both, but target is usually what user typed)
+    // If we have a resolved IP, we could show it, but 'target' variable holds the input.
+    // Let's stick to the input target for now as requested.
+    doc.text(`Target Device IP: ${target}`, 20, y); y += 7;
+    
+    // Monitoring Mode
+    doc.text(`Monitoring Mode: Continuous session`, 20, y); y += 15;
 
     // Statistics Box
     doc.setDrawColor(200);
@@ -542,6 +559,9 @@ async function generatePDF() {
     doc.text(`Min RTT: ${els.minRTT.textContent} ms`, 25, y);
     doc.text(`Avg RTT: ${els.avgRTT.textContent} ms`, 80, y);
     doc.text(`Max RTT: ${els.maxRTT.textContent} ms`, 135, y);
+    
+    // Add Jitter to PDF
+    doc.text(`Jitter: ${els.jitter.textContent} ms`, 25, y + 8);
 
     y += 25;
 
@@ -552,7 +572,7 @@ async function generatePDF() {
     doc.addImage(chartImg, 'PNG', 20, y, 170, 80);
 
     // Save
-    const defaultName = `EchoMon-Report-${target.replace(/\./g,'-')}-${new Date().toISOString().slice(0,10)}.pdf`;
+    const defaultName = `EchoMon-Report-${target.replace(/\./g,'-')}-${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.pdf`;
     
     try {
         const path = await save({
