@@ -2,11 +2,11 @@ use std::sync::Mutex;
 use tauri::{State, Manager};
 use rusqlite::{params, Connection};
 use serde::{Serialize, Deserialize};
-use chrono::Local;
+use chrono::Utc;
 use std::env;
 use std::path::PathBuf;
 use std::fs;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::str::FromStr;
 use std::time::Duration;
 use surge_ping::{Client, Config, PingIdentifier, PingSequence, IcmpPacket};
@@ -18,6 +18,7 @@ struct PingResult {
     success: bool,
     rtt: Option<f64>,
     error: Option<String>,
+    resolved_ip: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -72,7 +73,7 @@ fn get_db_path() -> PathBuf {
 #[tauri::command]
 fn start_session(target: String, state: State<AppState>) -> Result<i64, String> {
     let conn = state.db.lock().map_err(|_| "Database lock failed".to_string())?;
-    let start_time = Local::now().to_rfc3339();
+    let start_time = Utc::now().to_rfc3339();
 
     conn.execute(
         "INSERT INTO sessions (target, start_time, sent, received, lost) VALUES (?1, ?2, 0, 0, 0)",
@@ -86,7 +87,7 @@ fn start_session(target: String, state: State<AppState>) -> Result<i64, String> 
 #[tauri::command]
 fn stop_session(id: i64, sent: i32, received: i32, lost: i32, min: Option<f64>, avg: Option<f64>, max: Option<f64>, state: State<AppState>) -> Result<(), String> {
     let conn = state.db.lock().map_err(|_| "Database lock failed".to_string())?;
-    let end_time = Local::now().to_rfc3339();
+    let end_time = Utc::now().to_rfc3339();
 
     conn.execute(
         "UPDATE sessions SET end_time = ?1, sent = ?2, received = ?3, lost = ?4, min = ?5, avg = ?6, max = ?7 WHERE id = ?8",
@@ -168,13 +169,52 @@ fn save_binary_file(path: String, data: Vec<u8>) -> Result<(), String> {
 
 #[tauri::command]
 async fn ping_host(ip: String, session_id: Option<i64>, state: State<'_, AppState>) -> Result<PingResult, String> {
-    let addr = match Ipv4Addr::from_str(&ip) {
-        Ok(addr) => addr,
-        Err(_) => return Ok(PingResult { success: false, rtt: None, error: Some("Invalid IP address".to_string()) }),
+    // Try to parse as IP first, if fails, try to resolve hostname
+    let (addr, resolved_ip) = if let Ok(addr) = IpAddr::from_str(&ip) {
+        (addr, None)
+    } else {
+        // Resolve hostname
+        match (ip.as_str(), 0).to_socket_addrs() {
+            Ok(mut addrs) => {
+                // Prefer IPv4 for now as surge-ping configuration might default to V4 socket
+                // or we can try to find the first one.
+                let mut chosen_addr = None;
+
+                // Try to find an IPv4 address first
+                for a in addrs {
+                    if a.ip().is_ipv4() {
+                        chosen_addr = Some(a.ip());
+                        break;
+                    }
+                }
+
+                // If no IPv4, take whatever (IPv6) - but surge-ping client needs to be configured for it?
+                // The current Client::new(&Config::default()) creates a V4 socket by default on some platforms/versions?
+                // Actually Config::default() usually supports both if the OS does.
+                // But let's see.
+
+                if let Some(socket_addr) = chosen_addr {
+                    (socket_addr, Some(socket_addr.to_string()))
+                } else {
+                    // Re-resolve to get the iterator again or just error if we consumed it and found nothing?
+                    // Let's just re-resolve to get the first one if no IPv4 found.
+                    if let Ok(mut addrs_retry) = (ip.as_str(), 0).to_socket_addrs() {
+                         if let Some(socket_addr) = addrs_retry.next() {
+                             (socket_addr.ip(), Some(socket_addr.ip().to_string()))
+                         } else {
+                             return Ok(PingResult { success: false, rtt: None, error: Some("Could not resolve hostname".to_string()), resolved_ip: None });
+                         }
+                    } else {
+                        return Ok(PingResult { success: false, rtt: None, error: Some("Could not resolve hostname".to_string()), resolved_ip: None });
+                    }
+                }
+            },
+            Err(e) => return Ok(PingResult { success: false, rtt: None, error: Some(format!("DNS resolution failed: {}", e)), resolved_ip: None }),
+        }
     };
 
     let client = Client::new(&Config::default()).map_err(|e| e.to_string())?;
-    let mut pinger = client.pinger(IpAddr::V4(addr), PingIdentifier(random())).await;
+    let mut pinger = client.pinger(addr, PingIdentifier(random())).await;
     pinger.timeout(Duration::from_secs(1));
 
     let result: Result<(IcmpPacket, Duration), surge_ping::SurgeError> = pinger.ping(PingSequence(0), &[]).await;
@@ -185,14 +225,14 @@ async fn ping_host(ip: String, session_id: Option<i64>, state: State<'_, AppStat
     };
 
     if let Ok(conn) = state.db.lock() {
-        let timestamp = Local::now().to_rfc3339();
+        let timestamp = Utc::now().to_rfc3339();
         let _ = conn.execute(
             "INSERT INTO pings (target, timestamp, success, rtt, session_id) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![ip, timestamp, success, rtt, session_id],
         );
     }
 
-    Ok(PingResult { success, rtt, error })
+    Ok(PingResult { success, rtt, error, resolved_ip })
 }
 
 #[tauri::command]
@@ -209,11 +249,31 @@ fn get_stats(state: State<AppState>) -> Result<serde_json::Value, String> {
         let min: Option<f64> = row.get(2).ok();
         let max: Option<f64> = row.get(3).ok();
 
+        // Calculate Jitter
+        let mut jitter: Option<f64> = None;
+        if count > 1 {
+             let mut stmt_jitter = conn.prepare("SELECT rtt FROM pings WHERE success = 1 ORDER BY id ASC").map_err(|e| e.to_string())?;
+             let rtt_iter = stmt_jitter.query_map([], |row| row.get::<_, f64>(0)).map_err(|e| e.to_string())?;
+
+             let mut rtts = Vec::new();
+             for rtt in rtt_iter {
+                 if let Ok(val) = rtt {
+                     rtts.push(val);
+                 }
+             }
+
+             if rtts.len() > 1 {
+                 let sum_diff: f64 = rtts.windows(2).map(|w| (w[1] - w[0]).abs()).sum();
+                 jitter = Some(sum_diff / (rtts.len() - 1) as f64);
+             }
+        }
+
         return Ok(serde_json::json!({
             "count": count,
             "avg": avg,
             "min": min,
-            "max": max
+            "max": max,
+            "jitter": jitter
         }));
     }
 
@@ -263,6 +323,26 @@ pub fn run() {
     );
 
     tauri::Builder::default()
+        .setup(|app| {
+            // On Windows, check for admin rights.
+            #[cfg(windows)]
+            {
+                if !is_admin() {
+                    let handle = app.handle().clone();
+
+                    if let Some(window) = handle.get_webview_window("main") {
+                         app.dialog()
+                            .message("EchoMon needs to be run as an administrator to send ICMP packets. Please restart the application with administrator rights.")
+                            .title("Administrator Privileges Required")
+                            .parent(&window)
+                            .show(|_| {});
+                    } else {
+                        eprintln!("Administrator Privileges Required: EchoMon needs to be run as an administrator.");
+                    }
+                }
+            }
+            Ok(())
+        })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -270,4 +350,34 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![ping_host, get_stats, start_session, stop_session, get_sessions, delete_session, get_session_pings, export_logs_to_path, save_binary_file])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(windows)]
+fn is_admin() -> bool {
+    use windows::Win32::System::Threading::{OpenProcessToken, GetCurrentProcess};
+    use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_QUERY, TOKEN_ELEVATION};
+    use std::mem;
+
+    let mut token = Default::default();
+    unsafe {
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+            return false;
+        }
+    }
+
+    let mut elevation: TOKEN_ELEVATION = unsafe { mem::zeroed() };
+    let mut size = mem::size_of::<TOKEN_ELEVATION>() as u32;
+    unsafe {
+        if GetTokenInformation(
+            token,
+            TokenElevation,
+            Some(&mut elevation as *mut _ as *mut _),
+            size,
+            &mut size,
+        ).is_err() {
+            return false;
+        }
+    }
+
+    elevation.TokenIsElevated != 0
 }

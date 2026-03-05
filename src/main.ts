@@ -23,6 +23,7 @@ const els = {
     minRTT: document.getElementById('minRTT') as HTMLElement,
     avgRTT: document.getElementById('avgRTT') as HTMLElement,
     maxRTT: document.getElementById('maxRTT') as HTMLElement,
+    jitter: document.getElementById('jitter') as HTMLElement,
     uptime: document.getElementById('uptime') as HTMLElement,
     packetCounter: document.getElementById('packetCounter') as HTMLElement,
     liveIP: document.getElementById('liveIP') as HTMLElement,
@@ -33,7 +34,8 @@ const els = {
 
 function ts() {
     const d = new Date();
-    return d.toISOString().replace('T', ' ').substring(0, 23);
+    // Local time for live logs
+    return d.toLocaleString('sv-SE').replace(',', ''); // YYYY-MM-DD HH:MM:SS format
 }
 
 function log(msg: string, header = false) {
@@ -56,13 +58,26 @@ function updateStats() {
         const min = Math.min(...rttValues).toFixed(1);
         const max = Math.max(...rttValues).toFixed(1);
         const avg = (rttValues.reduce((a,b)=>a+b,0)/rttValues.length).toFixed(1);
+        
+        // Calculate Jitter: Average of absolute differences between consecutive RTTs
+        let jitter = 0;
+        if (rttValues.length > 1) {
+            let sumDiff = 0;
+            for (let i = 1; i < rttValues.length; i++) {
+                sumDiff += Math.abs(rttValues[i] - rttValues[i-1]);
+            }
+            jitter = sumDiff / (rttValues.length - 1);
+        }
+
         els.minRTT.textContent = min;
         els.maxRTT.textContent = max;
         els.avgRTT.textContent = avg;
+        els.jitter.textContent = jitter.toFixed(1);
     } else {
         els.minRTT.textContent = "—";
         els.maxRTT.textContent = "—";
         els.avgRTT.textContent = "—";
+        els.jitter.textContent = "—";
     }
 }
 
@@ -81,14 +96,37 @@ async function doRealPing() {
     
     try {
         const result: any = await invoke('ping_host', { ip, sessionId: currentSessionId });
+        
+        // Log resolved IP if it's different from input and present
+        if (result.resolved_ip && result.resolved_ip !== ip) {
+             // Only log once per session or if it changes? 
+             // For now, let's log it if it's the first ping or just log it.
+             // To avoid spamming, maybe check if we already logged it?
+             // But doRealPing is called every interval.
+             // Let's just log it in the debug message or a special message if it's new.
+             // Actually, the user asked to "show logs of fetching ipv4 from url".
+             // So logging it every time is fine, or maybe just:
+             // "Reply from 1.2.3.4 (x.com): ..."
+        }
+
         if (result.success && result.rtt !== null) {
             received++;
             rttValues.push(result.rtt);
             rttHistory.push({ t: ts(), rtt: result.rtt });
-            log(`Reply from ${ip}: bytes=32 time=${result.rtt}ms TTL=128`);
+            
+            const from = result.resolved_ip ? `${result.resolved_ip} (${ip})` : ip;
+            log(`Reply from ${from}: bytes=32 time=${result.rtt}ms TTL=128`);
         } else {
             lost++;
-            log(`Request timed out.`);
+            if (result.resolved_ip) {
+                 log(`Request timed out for ${result.resolved_ip} (${ip}).`);
+            } else {
+                 log(`Request timed out.`);
+            }
+            
+            if (result.error) {
+                log(`[ERROR] ${result.error}`);
+            }
         }
     } catch (err: any) {
         lost++;
@@ -246,6 +284,7 @@ async function showHistory() {
             let durationStr = "—";
 
             if (s.start_time) {
+                // Parse UTC string from DB, JS Date automatically converts to local time
                 const startDate = new Date(s.start_time);
                 let endDate = new Date();
                 
@@ -258,13 +297,18 @@ async function showHistory() {
                 const durationMs = endDate.getTime() - startDate.getTime();
                 const durationSec = Math.floor(durationMs / 1000);
                 durationStr = `${Math.floor(durationSec/60).toString().padStart(2,'0')}:${(durationSec % 60).toString().padStart(2,'0')}`;
+                
+                // Format local date string
+                var localDateStr = startDate.toLocaleString();
+            } else {
+                var localDateStr = "Unknown";
             }
 
             const row = `
                 <tr class="hover:bg-gray-800/50 border-b border-gray-800 last:border-0 cursor-pointer transition-colors" onclick="toggleGraph(${s.id})">
                     <td class="px-4 py-3 font-medium text-white">${s.id}</td>
                     <td class="px-4 py-3 font-mono text-emerald-300">${s.target}</td>
-                    <td class="px-4 py-3 text-gray-400">${new Date(s.start_time).toLocaleString()}</td>
+                    <td class="px-4 py-3 text-gray-400">${localDateStr}</td>
                     <td class="px-4 py-3 text-gray-400 font-mono">${durationStr}</td>
                     <td class="px-4 py-3 text-center text-white">${s.sent}</td>
                     <td class="px-4 py-3 text-center text-amber-400">${lossPct}%</td>
